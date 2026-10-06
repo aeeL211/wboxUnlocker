@@ -31,7 +31,7 @@ static void printLog(const char* fmt, ...) {
     fprintf(gLog, "\n");
     fflush(gLog);
   }
-  
+
   va_end(fargs);
   va_end(args);
 }
@@ -60,8 +60,12 @@ void initCrash() {
   memset(&sa, 0, sizeof(sa));
   sa.sa_flags = SA_SIGINFO;
   sa.sa_sigaction = onCrash;
+
   sigaction(SIGSEGV, &sa, nullptr);
   sigaction(SIGBUS, &sa, nullptr);
+  sigaction(SIGILL, &sa, nullptr);
+  sigaction(SIGABRT, &sa, nullptr);
+  sigaction(SIGFPE, &sa, nullptr);
 }
 
 // setup file
@@ -82,7 +86,7 @@ void initLog() {
 
   char logPath[350];
   snprintf(logPath, sizeof(logPath), "%s/log.txt", modsDir);
-  
+
   gLog = fopen(logPath, "w");
 }
 
@@ -90,22 +94,20 @@ void initLog() {
 void writeSave() {
   if (!gAppDir[0]) return;
 
-  char marker[350], save[350];
-  snprintf(marker, sizeof(marker), "%s/mods/.save", gAppDir);
-  
-  if (access(marker, F_OK) == 0) {
-    printLog("[*] Save file already injected. Skipping.");
+  char save[350];
+  snprintf(save, sizeof(save), "%s/worldboxProgress", gAppDir);
+
+  // Jangan overwrite save yang sudah ada.
+  if (access(save, F_OK) == 0) {
+    printLog("[*] Save file already exists. Skipping.");
     return;
   }
 
-  snprintf(save, sizeof(save), "%s/worldboxProgress", gAppDir);
   FILE* f = fopen(save, "w");
   if (f) {
     fputs(SAVE_DATA, f);
+    fflush(f);
     fclose(f);
-
-    FILE* m = fopen(marker, "w");
-    if (m) fclose(m);
 
     printLog("[+] Save file injected successfully.");
   } else {
@@ -159,6 +161,10 @@ bool applyPatch(uintptr_t addr, uint32_t val) {
 
   *(volatile uint32_t*)addr = val;
   __builtin___clear_cache((char*)addr, (char*)(addr + sizeof(uint32_t)));
+
+  // Kembalikan protection seperti semula.
+  mprotect((void*)pageStart, gPageSize, PROT_READ | PROT_EXEC);
+
   return true;
 }
 
@@ -183,6 +189,7 @@ bool getBase(uintptr_t* outBase, size_t* outSize) {
       }
     }
   }
+
   fclose(fp);
 
   if (bestBase != 0 && bestSize > 0x100000) {
@@ -190,6 +197,7 @@ bool getBase(uintptr_t* outBase, size_t* outSize) {
     *outSize = bestSize;
     return true;
   }
+
   return false;
 }
 
@@ -204,15 +212,18 @@ uintptr_t scan(uintptr_t base, size_t size, const char* pat, const char* mask) {
   for (size_t i = 0; i <= size - len; i += 4) {
     if (mem[i] == pattern[0]) {
       bool match = true;
+
       for (size_t j = 1; j < len; j++) {
         if (mask[j] != '?' && pattern[j] != mem[i + j]) {
           match = false;
           break;
         }
       }
+
       if (match) return base + i;
     }
   }
+
   return 0;
 }
 
@@ -220,13 +231,15 @@ void* modThread(void*) {
   gPageSize = sysconf(_SC_PAGESIZE);
   initCrash();
   initLog();
-  
+
   printLog("WorldBox Mod Initialized");
   writeSave();
 
   printLog("[*] Waiting for libil2cpp.so...");
+
   uintptr_t base = 0;
   size_t size = 0;
+
   while (!getBase(&base, &size)) {
     usleep(200000);
   }
@@ -234,6 +247,10 @@ void* modThread(void*) {
   printLog("[+] Engine Loaded");
   printLog(" |  Base: %p", (void*)base);
   printLog(" |  Size: %.2f MB", size / 1048576.0);
+
+  // Beri IL2CPP waktu menyelesaikan startup.
+  usleep(1000000);
+
   printLog("[*] Starting Memory Scan...");
 
   size_t total = sizeof(PATCHES) / sizeof(PatchDef);
@@ -241,10 +258,11 @@ void* modThread(void*) {
 
   for (size_t i = 0; i < total; ++i) {
     uintptr_t addr = scan(base, size, PATCHES[i].pat, PATCHES[i].mask);
+
     if (addr) {
       uintptr_t targetAddr = addr + 8;
       uint32_t val = (PATCHES[i].type == 1) ? ARM64_MOV_W0_1 : ARM64_NOP;
-      
+
       if (applyPatch(targetAddr, val)) {
         printLog("[+] Patch %02zu Applied | Offset: 0x%lX", i + 1, targetAddr - base);
         applied++;
@@ -262,6 +280,7 @@ void* modThread(void*) {
     fclose(gLog);
     gLog = nullptr;
   }
+
   return nullptr;
 }
 
