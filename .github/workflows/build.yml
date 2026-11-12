@@ -11,12 +11,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build & Package
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-23 \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --target aeeL --parallel
+
+      - name: Package
         run: |
           mkdir -p output/lib/arm64-v8a
-          $ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang++ \
-            -shared -fPIC -O3 -Wl,-s -static-libstdc++ \
-            -o output/lib/arm64-v8a/libaeeL.so hook.cpp -llog -ldl
+          cp build/libaeeL.so output/lib/arm64-v8a/libaeeL.so
+          test ! -e output/lib/arm64-v8a/libshadowhook_nothing.so
+
+          # The game APK has no libc++_shared.so; the mod must not depend on it.
+          if readelf -d output/lib/arm64-v8a/libaeeL.so | grep -q 'libc++_shared'; then
+            echo "unexpected libc++_shared.so dependency" >&2
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
